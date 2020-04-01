@@ -1,0 +1,356 @@
+---
+title: "derivative of gam as a predictor"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F)
+library(tidyverse)
+library(boot)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(doSNOW)
+library(pROC)
+library(chron)
+library(refund)
+library(mgcv)
+library(fda)
+library(plotly)
+library(gratia)
+```
+
+
+## o2 full data
+
+
+```{r}
+set.seed(345)
+dat_o2 <- read.csv('datall.csv')
+dat_o2$t <- as.POSIXct(dat_o2$Time , format = "%H:%M:%S" , tz = "GMT")
+```
+
+
+```{r}
+get_derivatives <- function(data = dat_o2, i = 1, k = 10){
+  id <- unique(data$StudyID)[i]
+  dati <- data[data$StudyID == id,] ## data need to be changed
+  diff <- unique(  as.numeric(chron::times(gsub(" PM", "", dati$Time)))  )[2]- unique(  as.numeric(chron::times(gsub(" PM", "", dati$Time)))  )[1]
+  dati$Time2 = 4 *   (as.numeric(chron::times(gsub(" PM", "", dati$Time))) - as.numeric(chron::times(gsub(" PM", "", dati$Time)[dim(dati)[1]]))) / diff
+  dati$Time2 <- round(dati$Time2)
+  fit_gam_all <- tryCatch(
+    {
+      gam(as.numeric(y) ~ s(Time2, bs="cs", k=k), method="REML" , data = dati)
+    }, error = function(x) NA
+  )
+  
+  if( is.na(fit_gam_all)[1] ){
+    print( (paste('patients',i,'cannot fit gam function'))  )
+    return(NA)
+    next
+  }
+
+  obj_fd_gam_all <- fderiv(fit_gam_all)
+  fd_gam_all <- as.numeric(obj_fd_gam_all$derivatives$`s(Time2)`$deriv)
+  df_fd <- cbind(Time2 = (obj_fd_gam_all$eval), fd = fd_gam_all)
+  df_fd$Time2 <- round(df_fd$Time2 - df_fd$Time2 %% 4)
+  left_join(dati,  df_fd, by = "Time2")
+
+}
+
+
+```
+
+
+
+
+
+```{r}
+loop_indx1 <- 1:length(unique(dat_o2$StudyID))
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+dat_o2_derivatives <- foreach(x=loop_indx1,.packages=c('gratia', 'tidyverse','mgcv','chron'), .combine = rbind ) %dopar% get_derivatives(data = dat_o2, i = x, k = 10)
+
+#close(pb)
+stopCluster(cl)
+
+```
+
+
+
+
+```{r}
+dat_o2_derivatives %>%
+  group_by(StudyID) %>%
+  summarise(fd = mean(fd, na.rm = T),
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_grouped
+```
+
+
+### Prediction Accuracy
+
+
+```{r}
+err <- NULL
+err_estimate <- function(i, data = dat_o2_grouped){
+  dat_o2_grouped$dummy <- ifelse(dat_o2_grouped$fd < i, yes = 0, no = 1)
+  fit_glm1 <- glm(survival ~ dummy, data = dat_o2_grouped, family = binomial)
+  set.seed(123)
+  cv.glm(data = dat_o2_grouped, glmfit = fit_glm1,K = 10)$delta[1]
+
+}
+
+
+```
+
+
+
+```{r, include=F}
+loop_indx1 <- seq(min(dat_o2_grouped$fd), max(dat_o2_grouped$fd), by = 0.1)
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+err1 <- foreach(x=loop_indx1,.packages=c('boot', 'tidyverse'), .combine = rbind ) %dopar% err_estimate(x, data = dat_o2_grouped)
+
+
+#close(pb)
+stopCluster(cl)
+
+```
+
+
+
+```{r}
+plot(loop_indx1, err1, type = 's', xlab = 'Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)],min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)] - 5, 0.0358 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+```
+
+
+
+
+
+### AUC
+
+
+
+```{r}
+
+auc_estimation <- function(data = dat_o2_grouped, k = 5, y = 'survival', x = 'fd'){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fml <- as.formula(paste0(y, '~', x))
+    fit_glm1 <- glm(fml, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'fd')
+})
+
+```
+
+
+
+
+```{r}
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+
+
+
+
+
+
+
+## o2 reducted data
+
+
+```{r}
+set.seed(345)
+dat_o2 <- read.csv('dat_o2_reduction_22_May_2020.csv')
+dat_o2$t <- as.POSIXct(dat_o2$Time , format = "%H:%M:%S" , tz = "GMT")
+```
+
+
+```{r}
+i = 2
+get_derivatives <- function(data = dat_o2, i = 1, k = 10){
+  id <- unique(data$StudyID)[i]
+  dati <- data[data$StudyID == id,] ## data need to be changed
+  dati <- dati[!is.na(dati$X),]
+  diff <- unique(  as.numeric(chron::times(gsub(" PM", "", dati$Time)))  )[2]- unique(  as.numeric(chron::times(gsub(" PM", "", dati$Time)))  )[1]
+  dati$Time2 = 4 *   (as.numeric(chron::times(gsub(" PM", "", dati$Time))) - as.numeric(chron::times(gsub(" PM", "", dati$Time)[dim(dati)[1]]))) / diff
+  dati$Time2 <- round(dati$Time2)
+  
+  fit_gam_all <- tryCatch(
+    {
+      gam(as.numeric(y) ~ s(Time2, bs="cs", k=k), method="REML" , data = dati)
+    }, error = function(x) NA
+  )
+  
+  if( is.na(fit_gam_all)[1] ){
+    print( (paste('patients',i,'cannot fit gam function'))  )
+    return(NA)
+    next
+  }
+
+  obj_fd_gam_all <- fderiv(fit_gam_all)
+  fd_gam_all <- as.numeric(obj_fd_gam_all$derivatives$`s(Time2)`$deriv)
+  df_fd <- cbind(Time2 = (obj_fd_gam_all$eval), fd = fd_gam_all)
+  df_fd$Time2 <- round(df_fd$Time2 - df_fd$Time2 %% 4)
+  left_join(dati,  df_fd, by = "Time2")
+
+}
+
+
+
+```
+
+
+```{r}
+loop_indx1 <- 1:length(unique(dat_o2$StudyID))
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+dat_o2_derivatives <- foreach(x=loop_indx1,.packages=c('gratia', 'tidyverse','mgcv','chron'), .combine = rbind ) %dopar% get_derivatives(data = dat_o2, i = x, k = 10)
+
+#close(pb)
+stopCluster(cl)
+
+```
+
+
+
+
+```{r}
+dat_o2_derivatives %>%
+  group_by(StudyID) %>%
+  summarise(fd = mean(fd, na.rm = T),
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+```
+
+
+### Prediction Accuracy
+
+
+```{r}
+
+err <- NULL
+err_estimate <- function(i, data = dat_o2_grouped){
+  dat_o2_grouped$dummy <- ifelse(dat_o2_grouped$fd < i, yes = 0, no = 1)
+  fit_glm1 <- glm(survival ~ dummy, data = dat_o2_grouped, family = binomial)
+  set.seed(123)
+  cv.glm(data = dat_o2_grouped, glmfit = fit_glm1,K = 10)$delta[1]
+
+}
+dat_o2_grouped <- dat_o2_grouped[!is.na(dat_o2_grouped$fd),]
+```
+
+
+
+```{r, include=F}
+loop_indx1 <- seq(min(na.omit(dat_o2_grouped$fd)), max(na.omit(dat_o2_grouped$fd)), by = 0.1)
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+err1 <- foreach(x=loop_indx1,.packages=c('boot', 'tidyverse'), .combine = rbind ) %dopar% err_estimate(x, data = dat_o2_grouped)
+
+
+#close(pb)
+stopCluster(cl)
+
+```
+
+
+
+
+```{r}
+plot(loop_indx1, err1, type = 's', xlab = 'Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)],min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)]-2, 0.0397 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+```
+
+### AUC
+
+```{r}
+
+auc_estimation <- function(data = dat_o2_grouped, k = 5, y = 'survival', x = 'fd'){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fml <- as.formula(paste0(y, '~', x))
+    fit_glm1 <- glm(fml, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'fd')
+})
+
+```
+
+
+
+
+```{r}
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+
+
+
+
+

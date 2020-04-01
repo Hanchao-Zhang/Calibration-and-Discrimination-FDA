@@ -1,0 +1,244 @@
+---
+title: "mean_o2_31_Mar_2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(tidyverse)
+library(boot)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(doSNOW)
+library(pROC)
+
+```
+
+## o2 full data
+```{r}
+set.seed(345)
+dat_o2 <- read.csv('datall.csv')
+```
+
+
+
+```{r}
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(mean = mean(y), survival =mean(survival)) -> dat_o2_grouped
+```
+
+
+
+```{r}
+dat_o2_re <- read.csv('dat_o2_reduction_22_May_2020.csv')
+dat_o2_re <- na.omit(dat_o2_re)
+```
+
+
+
+```{r}
+dat_o2_re %>%
+  group_by(StudyID) %>%
+  summarise(mean = mean(y), survival =mean(survival)) -> dat_o2_re_grouped
+```
+
+
+
+```{r}
+dat_o2_grouped <- dat_o2_grouped[dat_o2_grouped$StudyID %in% dat_o2_re_grouped$StudyID,]
+```
+
+
+### Prediction Accuracy
+
+```{r}
+loop_indx1 <- seq(min(dat_o2_grouped$mean), max(dat_o2_grouped$mean), by = 1)
+err <- NULL
+err_estimate <- function(i, data = dat_o2_grouped){
+  dat_o2_grouped$dummy <- ifelse(dat_o2_grouped$mean < i, yes = 0, no = 1)
+  fit_glm1 <- glm(survival ~ dummy, data = dat_o2_grouped, family = binomial)
+  set.seed(123)
+  cv.glm(data = dat_o2_grouped, glmfit = fit_glm1,K = 10)$delta[1]
+
+}
+
+
+```
+
+
+
+```{r, include=F}
+loop_indx1 <- seq(min(dat_o2_grouped$mean), max(dat_o2_grouped$mean), by = 1)
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+err1 <- foreach(x=loop_indx1,.packages=c('boot', 'tidyverse'), .combine = rbind ) %dopar% err_estimate(x, data = dat_o2_grouped)
+
+
+#close(pb)
+stopCluster(cl)
+
+```
+
+
+
+```{r}
+plot(loop_indx1, err1, type = 's', xlab = 'Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)],min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)], 0.041 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+```
+
+### AUC
+
+
+```{r, warning=F}
+
+auc_estimation <- function(data = dat_o2_grouped, k = 5){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fit_glm1 <- glm(survival ~ mean, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5)
+})
+
+```
+
+
+
+```{r}
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+add duration and age in the model for calculating AUC
+
+
+
+## o2 reduced data
+
+
+```{r}
+dat_o2 <- read.csv('dat_o2_reduction_22_May_2020.csv')
+dat_o2 <- na.omit(dat_o2)
+```
+
+
+
+```{r}
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(mean = mean(y), survival =mean(survival)) -> dat_o2_grouped
+```
+
+
+### Prediction Accuracy
+
+```{r}
+loop_indx1 <- seq(min(dat_o2_grouped$mean), max(dat_o2_grouped$mean), by = 1)
+err <- NULL
+err_estimate <- function(i, data = dat_o2_grouped){
+  dat_o2_grouped$dummy <- ifelse(dat_o2_grouped$mean < i, yes = 0, no = 1)
+  fit_glm1 <- glm(survival ~ dummy, data = dat_o2_grouped, family = binomial)
+  set.seed(123)
+  cv.glm(data = dat_o2_grouped, glmfit = fit_glm1,K = 10)$delta[1]
+
+}
+
+
+```
+
+
+
+```{r, include=F}
+loop_indx1 <- seq(min(dat_o2_grouped$mean), max(dat_o2_grouped$mean), by = 1)
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+err1 <- foreach(x=loop_indx1,.packages=c('boot', 'tidyverse'), .combine = rbind ) %dopar% err_estimate(x, data = dat_o2_grouped)
+
+
+#close(pb)
+stopCluster(cl)
+```
+
+
+
+```{r}
+plot(loop_indx1, err1, type = 's', xlab = 'Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)],min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)], 0.042 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+
+
+```
+
+
+### AUC
+
+```{r, warning=F}
+
+auc_estimation <- function(data = dat_o2_grouped, k = 5){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fit_glm1 <- glm(survival ~ mean, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5)
+})
+
+```
+
+
+
+```{r}
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+
+
+
+
+

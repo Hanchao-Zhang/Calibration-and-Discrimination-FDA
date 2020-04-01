@@ -1,0 +1,274 @@
+---
+title: "cpr_time_31_Mar_2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(tidyverse)
+library(boot)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(doSNOW)
+library(pROC)
+
+```
+
+
+## o2 full data
+
+
+```{r}
+set.seed(345)
+dat_o2 <- read.csv('datall.csv')
+dat_o2$t <- as.POSIXct(dat_o2$Time , format = "%H:%M:%S" , tz = "GMT")
+
+```
+
+
+
+```{r}
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(CPR_time = range(t)[2]-  range(t)[1],
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_cprtime
+dat_o2_cprtime$CPR_time <- as.numeric(dat_o2_cprtime$CPR_time)
+```
+
+
+
+### Prediction Accuracy
+
+
+
+```{r}
+fit_glm_cprtime <- glm(survival ~ CPR_time, data = dat_o2_cprtime, family = binomial)
+summary(fit_glm_cprtime)
+#cost_classification <- function(r, pi) mean(abs(r-pi) > 0.5)
+cv.glm(data = dat_o2_cprtime, glmfit = fit_glm_cprtime, K = 10)$delta[1]
+```
+
+
+
+
+
+
+```{r}
+loop_indx1 <- seq(min(dat_o2_cprtime$CPR_time), max(dat_o2_cprtime$CPR_time), by = 0.5)
+err <- NULL
+err_estimate <- function(i, data = dat_o2_cprtime){
+  dat_o2_cprtime$dummy <- ifelse(dat_o2_cprtime$CPR_time < i, yes = 0, no = 1)
+  fit_glm1 <- glm(survival ~ dummy, data = dat_o2_cprtime, family = binomial)
+  set.seed(123)
+  cv.glm(data = dat_o2_cprtime, glmfit = fit_glm1, K = 10)$delta[1]
+
+}
+
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+err1 <- foreach(x=loop_indx1,.packages=c('boot', 'tidyverse'), .combine = rbind ) %dopar% err_estimate(x, data = dat_o2_cprtime)
+
+#close(pb)
+stopCluster(cl)
+
+```
+
+
+```{r}
+plot(loop_indx1, err1, type = 's', xlab = 'CPR Time as Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)],min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)], 0.0355 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+
+
+```
+
+
+### AUC
+
+```{r, warning=F}
+
+auc_estimation <- function(data = dat_o2_cprtime, k = 5){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fit_glm1 <- glm(survival ~ CPR_time, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_cprtime, k = 5)
+})
+```
+
+
+```{r}
+hist(auc_rep_1000, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+
+
+
+
+
+
+## o2 reduced data
+
+
+```{r}
+dat_o2 <- read.csv('dat_o2_reduction_22_May_2020.csv')
+dat_o2 <- na.omit(dat_o2)
+dat_o2$t <- as.POSIXct(dat_o2$Time , format = "%H:%M:%S" , tz = "GMT")
+
+```
+
+
+
+```{r}
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(CPR_time = range(t)[2]-  range(t)[1],
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_cprtime
+dat_o2_cprtime$CPR_time <- as.numeric(dat_o2_cprtime$CPR_time)
+```
+
+
+### CPR time 
+
+```{r}
+fit_glm_cprtime <- glm(survival ~ CPR_time, data = dat_o2_cprtime, family = binomial)
+summary(fit_glm_cprtime)
+#cost_classification <- function(r, pi) mean(abs(r-pi) > 0.5)
+cv.glm(data = dat_o2_cprtime, glmfit = fit_glm_cprtime, K = 10)$delta[1]
+```
+
+### Prediction Accuracy
+
+
+
+```{r}
+loop_indx1 <- seq(min(dat_o2_cprtime$CPR_time), max(dat_o2_cprtime$CPR_time), by = 0.5)
+err <- NULL
+err_estimate <- function(i, data = dat_o2_cprtime){
+  dat_o2_cprtime$dummy <- ifelse(dat_o2_cprtime$CPR_time < i, yes = 0, no = 1)
+  fit_glm1 <- glm(survival ~ dummy, data = dat_o2_cprtime, family = binomial)
+  set.seed(123)
+  cv.glm(data = dat_o2_cprtime, glmfit = fit_glm1, K = 10)$delta[1]
+
+}
+
+clnum <- detectCores()
+cl <- makeCluster(clnum)
+registerDoSNOW(cl)
+#pb <- txtProgressBar(max = length(loop_indx1), style = 3)
+#progress <- function(n) setTxtProgressBar(pb, n)
+#opts <- list(progress = progress)
+
+err1 <- foreach(x=loop_indx1,.packages=c('boot', 'tidyverse'), .combine = rbind ) %dopar% err_estimate(x, data = dat_o2_cprtime)
+
+#close(pb)
+stopCluster(cl)
+
+```
+
+
+```{r}
+plot(loop_indx1, err1, type = 's', xlab = 'CPR Time as Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)],min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)], 0.0388 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+
+
+```
+
+### AUC
+
+```{r, warning=F}
+
+auc_estimation <- function(data = dat_o2_cprtime, k = 5){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fit_glm1 <- glm(survival ~ CPR_time, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_cprtime, k = 5)
+})
+```
+
+
+```{r}
+hist(auc_rep_1000, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
