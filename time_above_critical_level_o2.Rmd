@@ -1,0 +1,370 @@
+---
+title: "time above critical level of o2"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F)
+library(tidyverse)
+library(boot)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(doSNOW)
+library(pROC)
+library(chron)
+library(refund)
+library(mgcv)
+library(fda)
+library(plotly)
+library(gratia)
+```
+
+
+## o2 full data
+
+
+```{r}
+set.seed(345)
+dat_o2 <- read.csv('datall.csv')
+dat_o2$t <- as.POSIXct(dat_o2$Time , format = "%H:%M:%S" , tz = "GMT")
+```
+
+### Prediction Accuracy
+
+```{r}
+loop_indx1 <- seq(min(dat_o2$y), max(dat_o2$y), by = 1  )
+err1 <- NULL
+
+for (i in loop_indx1) {
+  dat_o2$dummy <- ifelse(dat_o2$y < i, yes = 0, no = 1)
+  dat_o2 %>%
+    group_by(StudyID) %>%
+    summarise(perc = sum(dummy)/n(),
+              y = mean(y),
+              survival = mean(survival),
+              ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+  fit_glm1 <- glm(survival ~ perc, data = dat_o2_grouped, family = binomial)
+  set.seed(123)
+  err1[i] <- cv.glm(data = dat_o2_grouped, glmfit = fit_glm1,K = 10)$delta[1]
+  
+}
+
+
+
+```
+
+
+
+
+```{r}
+plot(loop_indx1[-1], err1, type = 's', xlab = 'Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)]+1,min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)]+5, 0.0358 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+```
+
+
+
+```{r}
+dat_o2$dummy <- ifelse(dat_o2$y < 11, yes = 0, no = 1)
+
+
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(perc = sum(dummy)/n(),
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+
+```
+
+
+### AUC
+
+```{r}
+
+auc_estimation <- function(data = dat_o2_grouped, k = 5, y = 'survival', x = 'fd'){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fml <- as.formula(paste0(y, '~', x))
+    fit_glm1 <- glm(fml, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'perc')
+})
+
+```
+
+
+
+
+```{r}
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+## AUC 2
+
+```{r}
+auc_list <- list()
+loop_indx1 <- seq(min(dat_o2$y), max(dat_o2$y), by = 1  )
+loop_indx1 <- loop_indx1[-1]
+
+for (i in loop_indx1) {
+
+  dat_o2$dummy <- ifelse(dat_o2$y < i, yes = 0, no = 1)
+  dat_o2 %>%
+    group_by(StudyID) %>%
+    summarise(perc = sum(dummy)/n(),
+              y = mean(y),
+              survival = mean(survival),
+              ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+  auc_list[[i]] <- replicate(100,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'perc')
+  })
+  #cat("\014")
+  #print( paste0(round(i/length(loop_indx1),2) *100 , '%') )
+  
+}
+
+err_mean <- NULL
+for (i in 1:length(auc_list)) {
+  err_mean[i] <- mean(auc_list[[i]], na.rm = T)
+  
+}
+
+
+```
+
+
+
+
+```{r}
+dat_o2$dummy <- ifelse(dat_o2$y < loop_indx1[which.max(err_mean)], yes = 0, no = 1)
+
+
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(perc = sum(dummy)/n(),
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'perc')
+})
+
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+
+
+
+
+
+
+
+
+
+
+## reduced o2 full data
+
+
+```{r}
+dat_o2 <- read.csv('dat_o2_reduction_22_May_2020.csv')
+dat_o2$t <- as.POSIXct(dat_o2$Time , format = "%H:%M:%S" , tz = "GMT")
+```
+
+### Prediction Accuracy
+
+
+```{r}
+dat_o2 <- na.omit(dat_o2)
+loop_indx1 <- seq(min(dat_o2$y), max(dat_o2$y), by = 1  )
+err1 <- NULL
+
+for (i in loop_indx1) {
+  dat_o2$dummy <- ifelse(dat_o2$y < i, yes = 0, no = 1)
+  dat_o2 %>%
+    group_by(StudyID) %>%
+    summarise(perc = sum(dummy)/n(),
+              y = mean(y),
+              survival = mean(survival),
+              ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+  fit_glm1 <- glm(survival ~ perc, data = dat_o2_grouped, family = binomial)
+  set.seed(123)
+  err1[i] <- cv.glm(data = dat_o2_grouped, glmfit = fit_glm1,K = 10)$delta[1]
+  
+}
+
+
+
+```
+
+
+
+
+```{r}
+plot(loop_indx1[-1], err1, type = 's', xlab = 'Threshold', ylab = 'Prediction Error')
+points(loop_indx1[which.min(err1)]+1,min(err1), col = 'red', pch = 19)
+text(loop_indx1[which.min(err1)]+5, 0.0398 , paste0('Thres (PE) = ', round( loop_indx1[which.min(err1)],2 )   , ', ','(', round(min(err1),4), ')' ) , col = 'red')
+```
+
+
+
+```{r}
+dat_o2$dummy <- ifelse(dat_o2$y < 11, yes = 0, no = 1)
+
+
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(perc = sum(dummy)/n(),
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+
+```
+
+### AUC
+
+```{r}
+
+auc_estimation <- function(data = dat_o2_grouped, k = 5, y = 'survival', x = 'fd'){
+  
+  ind <- sample(nrow(data), nrow(data), replace = F)
+  dd <- data[ind,]
+  dd_list <- split(dd, c(1:k) )
+  auc_vec <- NULL
+
+  for(i in 1:k){
+    dd_v <- dd_list[[i]]
+    dd_t <- do.call(rbind, dd_list[i])
+    fml <- as.formula(paste0(y, '~', x))
+    fit_glm1 <- glm(fml, data = dd_t, family = binomial)
+    pred <- predict(fit_glm1, newdata = dd_v, type = 'response')
+    auc_vec[i] <- tryCatch({
+      roc(dd_v$survival, pred, levels = c(1, 0), direction = ">")$auc
+    }, error = function(x)NA)
+  }
+  mean(auc_vec, na.rm = T)
+}
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'perc')
+})
+
+```
+
+
+
+
+```{r}
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+## AUC 2
+
+```{r}
+auc_list <- list()
+loop_indx1 <- seq(min(dat_o2$y), max(dat_o2$y), by = 1  )
+loop_indx1 <- loop_indx1[-1]
+
+for (i in loop_indx1) {
+
+  dat_o2$dummy <- ifelse(dat_o2$y < i, yes = 0, no = 1)
+  dat_o2 %>%
+    group_by(StudyID) %>%
+    summarise(perc = sum(dummy)/n(),
+              y = mean(y),
+              survival = mean(survival),
+              ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+  auc_list[[i]] <- replicate(100,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'perc')
+  })
+  #cat("\014")
+  #print( paste0(round(i/length(loop_indx1),2) *100 , '%') )
+  
+}
+
+err_mean <- NULL
+for (i in 1:length(auc_list)) {
+  err_mean[i] <- mean(auc_list[[i]], na.rm = T)
+  
+}
+
+
+```
+
+
+
+
+```{r}
+dat_o2$dummy <- ifelse(dat_o2$y < loop_indx1[which.max(err_mean)], yes = 0, no = 1)
+
+
+dat_o2 %>%
+  group_by(StudyID) %>%
+  summarise(perc = sum(dummy)/n(),
+            y = mean(y),
+            survival = mean(survival),
+            ROSC = mean(ROSC) ) -> dat_o2_grouped
+
+auc_rep_1000 <- replicate(1000,{
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'perc')
+})
+
+hist(auc_rep_1000, breaks = 15, xlab = 'AUC', main = paste0( 'mean (CI) = ',  round(mean(auc_rep_1000),2) , ' (', round(quantile(auc_rep_1000, 0.025),2),' ,',  round(quantile(auc_rep_1000, 0.975),2), ')' ))
+abline(v = mean(auc_rep_1000), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
+abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
