@@ -2,8 +2,10 @@
 title: "Whole data Functional data analysis for o2 adjusted by APACHE"
 output:
   html_document:
-    toc: true
-    toc_float: true
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
 ---
 
 ```{r setup, include=FALSE}
@@ -28,7 +30,7 @@ library(gratia)
 
 set.seed(456)
 
-auc_estimation <- function(data = dat_o2_grouped, k = 5, y = 'ROSC', x = 'fd'){
+auc_estimation <- function(data = dat_o2_grouped, k = 5, y = 'survival', x = 'fd'){
   
   ind <- sample(nrow(data), nrow(data), replace = F)
   dd <- data[ind,]
@@ -88,7 +90,7 @@ dat_o2 %>%
 ### CPR duration above o2 level
 
 
-```{r, include=F}
+```{r}
 loop_indx1 <- seq(min(dat_o2$y), max(dat_o2$y), by = 1  )
 loop_indx1 <- loop_indx1[-1]
 
@@ -106,11 +108,11 @@ auc_list <- foreach(x=loop_indx1,.packages=c('tidyverse', 'pROC')) %dopar% {
     group_by(StudyID) %>%
     summarise(perc = sum(dummy)/n(),
               y = mean(y),
-              ROSC = mean(ROSC),
+              survival = mean(survival),
               ROSC = mean(ROSC) ) -> dat_o2_grouped
 
   replicate(50,{
-  auc_estimation(data = dat_o2_grouped, k = 5, y = 'ROSC', x = 'perc')
+  auc_estimation(data = dat_o2_grouped, k = 5, y = 'survival', x = 'perc')
   })
 
 }
@@ -769,8 +771,10 @@ abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
 ### mean o2, CPR duration and derivatives adjusted by APACHE
  
 ```{r}
-var_int = names(dat_o2_grouped_demographic)[grep('duration', names(dat_o2_grouped_demographic))]
-var_adj = c('APACHE', 'fd', 'mean_o2')
+var_int = 'mean_o2'
+var_adj = c('APACHE', 'fd',names(dat_o2_grouped_demographic)[grep('duration', names(dat_o2_grouped_demographic))])
+var_adj = c('APACHE', 'fd', 'CPR_time')
+
 y = 'survival'
 cv_pred_err <- cv_prediction_err(data = dat_o2_grouped_demographic, var_int = var_int, var_adj = var_adj, y = y, cv.seed = 456)
 ```
@@ -800,47 +804,6 @@ abline(v = mean(auc_rep_1000), col = 'red')
 abline(v = quantile(auc_rep_1000, 0.025), col = 'red')
 abline(v = quantile(auc_rep_1000, 0.975), col = 'red')
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
